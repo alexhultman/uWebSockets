@@ -83,65 +83,68 @@ struct Intersection {
     std::vector<Hole> holes;
 
     void forSubscriber(std::vector<unsigned int> &senderForMessages, std::function<void(std::pair<std::string_view, std::string_view>, bool)> cb) {
-        /* How far we already emitted of the two dataChannels */
-        std::pair<size_t, size_t> emitted = {};
-
-        /* This is a slow path of sorts, most subscribers will be observers, not active senders */
-        if (!senderForMessages.empty()) {
-
-            std::pair<size_t, size_t> toEmit = {};
-            unsigned int startAt = 0;
-
-            /* Iterate each message looking for any to skip */
-            for (auto &message : holes) {
-
-                /* If this message was sent by this subscriber skip it */
-                bool skipMessage = false;
-                for (unsigned int i = startAt; i < senderForMessages.size(); i++) {
-                    if (senderForMessages[i] > message.messageId) {
-                        startAt = i;
-                        break;
-                    }
-                    if (message.messageId == senderForMessages[i]) {
-                        skipMessage = true;
-                        startAt = ++i;
-                        break;
-                    }
-                }
-
-                /* Collect messages until a skip, then emit messages */
-                if (!skipMessage) {
-                    toEmit.first += message.lengths.first;
-                    toEmit.second += message.lengths.second;
-                } else {
-                    if (toEmit.first || toEmit.second) {
-                        std::pair<std::string_view, std::string_view> cutDataChannels = {
-                            std::string_view(dataChannels.first.data() + emitted.first, toEmit.first),
-                            std::string_view(dataChannels.second.data() + emitted.second, toEmit.second),
-                        };
-                        /* Only need to test the first data channel for "FIN" */
-                        cb(cutDataChannels, emitted.first + toEmit.first + message.lengths.first == dataChannels.first.length());
-                        emitted.first += toEmit.first;
-                        emitted.second += toEmit.second;
-                        toEmit = {};
-                    }
-                    /* This message is now accounted for, mark as emitted */
-                    emitted.first += message.lengths.first;
-                    emitted.second += message.lengths.second;
-                }
-            }
-        }
-
-        if (emitted.first == dataChannels.first.length() && emitted.second == dataChannels.second.length()) {
+        /* The fast path is if subscriber did not publish any messages, then none to filter out */
+        if (senderForMessages.empty()) {
+            cb(dataChannels, true);
             return;
         }
 
-        std::pair<std::string_view, std::string_view> cutDataChannels = {
-            std::string_view(dataChannels.first.data() + emitted.first, dataChannels.first.length() - emitted.first),
-            std::string_view(dataChannels.second.data() + emitted.second, dataChannels.second.length() - emitted.second),
-        };
+        std::pair<size_t, size_t> toEmit = {};
+        std::pair<size_t, size_t> emitted = {};
+        unsigned int examinedHoles = 0;
+        unsigned int totalHoles = senderForMessages.size();
 
-        cb(cutDataChannels, true);
+        /* Iterate each message looking for any to skip */
+        for (auto &message : holes) {
+
+            /* If this message was sent by this subscriber skip it */
+            bool skipMessage = false;
+            for (; examinedHoles < totalHoles; examinedHoles++) {
+                if (senderForMessages[examinedHoles] > message.messageId) {
+                    break;
+                }
+                if (message.messageId == senderForMessages[examinedHoles]) {
+                    skipMessage = true;
+                    examinedHoles++;
+                    break;
+                }
+            }
+
+            /* Collect messages until a skip, then emit messages */
+            if (!skipMessage) {
+                toEmit.first += message.lengths.first;
+                toEmit.second += message.lengths.second;
+            } else {
+                if (toEmit.first || toEmit.second) {
+                    std::pair<std::string_view, std::string_view> cutDataChannels = {
+                        std::string_view(dataChannels.first.data() + emitted.first, toEmit.first),
+                        std::string_view(dataChannels.second.data() + emitted.second, toEmit.second),
+                    };
+                    /* Only need to test the first data channel for "FIN" */
+                    cb(cutDataChannels, emitted.first + toEmit.first + message.lengths.first == dataChannels.first.length());
+                    emitted.first += toEmit.first;
+                    emitted.second += toEmit.second;
+                    toEmit = {};
+                }
+                /* This message is now accounted for, mark as emitted */
+                emitted.first += message.lengths.first;
+                emitted.second += message.lengths.second;
+            }
+
+            /* If all sender messageId's have been examined emit remaining messages */
+            if (examinedHoles == totalHoles) {
+                break;
+            }
+        }
+
+        /* Emit any last segment */
+        if (emitted.first != dataChannels.first.length() || emitted.second != dataChannels.second.length()) {
+            std::pair<std::string_view, std::string_view> cutDataChannels = {
+                std::string_view(dataChannels.first.data() + emitted.first, dataChannels.first.length() - emitted.first),
+                std::string_view(dataChannels.second.data() + emitted.second, dataChannels.second.length() - emitted.second),
+            };
+            cb(cutDataChannels, true);
+        }
     }
 };
 
